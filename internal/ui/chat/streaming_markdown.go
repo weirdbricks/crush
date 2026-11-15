@@ -51,6 +51,12 @@ type streamingMarkdown struct {
 	// a fresh O(document) scan on every flush.
 	stablePrefixLines int
 	lastLines         int
+
+	// finalContent, finalRender and finalLines memoize a cold RenderFinal
+	// at width. Any other render clears finalContent.
+	finalContent string
+	finalRender  string
+	finalLines   int
 }
 
 // LastLines reports the number of lines in the string the most recent
@@ -71,6 +77,9 @@ func (s *streamingMarkdown) Reset() {
 	s.baseHasListMarker = false
 	s.stablePrefixLines = 0
 	s.lastLines = 0
+	s.finalContent = ""
+	s.finalRender = ""
+	s.finalLines = 0
 }
 
 // Render returns the glamour render of content at the given width,
@@ -89,6 +98,23 @@ func (s *streamingMarkdown) Reset() {
 // trailing render sequence so other goroutines cannot interleave
 // their own Render calls and corrupt goldmark's BlockStack.
 func (s *streamingMarkdown) Render(content string, width int, renderer *glamour.TermRenderer) string {
+	return s.render(content, width, renderer, false)
+}
+
+// RenderFinal is Render for content that will not grow, such as a finished
+// message. With no cached prefix it renders once and skips seeding the
+// prefix cache, which costs a second render nothing would reuse. A prefix
+// left by streaming is still reused.
+func (s *streamingMarkdown) RenderFinal(content string, width int, renderer *glamour.TermRenderer) string {
+	return s.render(content, width, renderer, true)
+}
+
+func (s *streamingMarkdown) render(content string, width int, renderer *glamour.TermRenderer, final bool) string {
+	if final && s.finalContent != "" && width == s.width && content == s.finalContent {
+		s.lastLines = s.finalLines
+		return s.finalRender
+	}
+	s.finalContent, s.finalRender, s.finalLines = "", "", 0
 	mu := common.LockMarkdownRenderer(renderer)
 	mu.Lock()
 	defer mu.Unlock()
@@ -108,11 +134,16 @@ func (s *streamingMarkdown) Render(content string, width int, renderer *glamour.
 
 	// Width change OR content not a prefix-extension: drop cache,
 	// full render, optionally try to seed a fresh boundary on this
-	// call (step "f" in the design note).
-	if width != s.width || !strings.HasPrefix(content, s.stablePrefix) {
+	// call (step "f" in the design note). A final render with no prefix
+	// to reuse renders in one piece too.
+	if width != s.width || !strings.HasPrefix(content, s.stablePrefix) || (final && s.stablePrefix == "") {
 		s.Reset()
 		s.width = width
 		out := full()
+		if final {
+			s.finalContent, s.finalRender, s.finalLines = content, out, s.lastLines
+			return out
+		}
 		s.tryAdvanceFromEmpty(content, width, renderer)
 		return out
 	}

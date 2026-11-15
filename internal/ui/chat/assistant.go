@@ -721,7 +721,13 @@ func (a *AssistantMessageItem) cachedError(width int) string {
 // lines so the visual box matches what the user sees today.
 func (a *AssistantMessageItem) renderThinking(thinking string, width int) string {
 	renderer := common.QuietMarkdownRenderer(a.sty, width)
-	rendered := a.streamingThinking.Render(thinking, width, renderer)
+	var rendered string
+	// Reasoning stops growing once thinking ends, even mid-turn.
+	if a.message.IsThinking() {
+		rendered = a.streamingThinking.Render(thinking, width, renderer)
+	} else {
+		rendered = a.streamingThinking.RenderFinal(thinking, width, renderer)
+	}
 	rendered = strings.TrimSpace(rendered)
 	// The renderer already knows this count from its cached prefix, so
 	// take it rather than rescanning a document that only grows.
@@ -794,6 +800,10 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 // findSafeMarkdownBoundary.
 func (a *AssistantMessageItem) renderMarkdown(content string, width int) string {
 	renderer := common.MarkdownRenderer(a.sty, width)
+	// Content can grow until the whole message finishes.
+	if a.message.IsFinished() {
+		return a.streamingContent.RenderFinal(content, width, renderer)
+	}
 	return a.streamingContent.Render(content, width, renderer)
 }
 
@@ -874,7 +884,7 @@ func (a *AssistantMessageItem) Finished() bool {
 
 // clearCache drops every cached render for this item, including the
 // per-section caches. Shadows the embedded cachedMessageItem.clearCache
-// so ClearItemCaches (style change) wipes the section caches too.
+// so ClearItemCache (style change) wipes the section caches too.
 // F8: also drop the streaming-markdown stable-prefix cache because
 // the cached glamour render embeds the OLD style's ANSI sequences
 // and is no longer visually consistent with the new style.

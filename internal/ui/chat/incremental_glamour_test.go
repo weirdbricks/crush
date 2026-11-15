@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/glamour/v2"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/stretchr/testify/require"
 )
@@ -823,7 +824,7 @@ func TestStreamingMarkdown_LinkRefDefinition(t *testing.T) {
 }
 
 // TestAssistantStreamingContent_ResetOnClearCache guards the
-// integration contract that ClearItemCaches (style change) drops
+// integration contract that ClearItemCache (style change) drops
 // the streaming-markdown cache. Without this, a style change
 // would leave the OLD style's ANSI sequences embedded in the
 // stable-prefix render and the next flush would visually mix
@@ -844,7 +845,7 @@ func TestAssistantStreamingContent_ResetOnClearCache(t *testing.T) {
 	item.SetMessage(finishedAssistantMessage("stream-clear", doc2))
 	_ = item.RawRender(width)
 
-	// Now wipe the caches the way ClearItemCaches does.
+	// Now wipe the caches the way ClearItemCache does.
 	item.clearCache()
 
 	require.Equal(t, "", item.streamingContent.stablePrefix,
@@ -984,4 +985,82 @@ func TestStreamingMarkdown_LastLinesMatchesOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+// finalTestDoc is a document with safe boundaries, so Render would seed its
+// prefix cache from it.
+const finalTestDoc = "# Title\n\nFirst paragraph of the answer.\n\nSecond paragraph.\n\n- one\n- two\n"
+
+func TestStreamingMarkdown_RenderFinalColdMatchesFullRender(t *testing.T) {
+	t.Parallel()
+
+	var sm streamingMarkdown
+	got := sm.RenderFinal(finalTestDoc, 60, newTestRenderer(t, 60))
+	require.Equal(t, freshRender(t, finalTestDoc, 60), got)
+	require.Equal(t, countLines(trimGlamourMargins(got)), sm.LastLines())
+	require.Empty(t, sm.stablePrefix, "a final render must not seed the prefix cache")
+}
+
+func TestStreamingMarkdown_RenderFinalMemoHit(t *testing.T) {
+	t.Parallel()
+
+	var sm streamingMarkdown
+	first := sm.RenderFinal(finalTestDoc, 60, newTestRenderer(t, 60))
+	lines := sm.LastLines()
+
+	// A renderer that wraps differently proves the repeat skips glamour.
+	again := sm.RenderFinal(finalTestDoc, 60, newTestRenderer(t, 12))
+	require.Equal(t, first, again)
+	require.Equal(t, lines, sm.LastLines())
+
+	// A new width or new content misses.
+	require.Equal(t, freshRender(t, finalTestDoc, 30), sm.RenderFinal(finalTestDoc, 30, newTestRenderer(t, 30)))
+	other := finalTestDoc + "\nMore.\n"
+	require.Equal(t, freshRender(t, other, 30), sm.RenderFinal(other, 30, newTestRenderer(t, 30)))
+}
+
+func TestStreamingMarkdown_RenderFinalThenRender(t *testing.T) {
+	t.Parallel()
+
+	var sm streamingMarkdown
+	_ = sm.RenderFinal(finalTestDoc, 60, newTestRenderer(t, 60))
+
+	// Growing again after a final render streams as usual.
+	grown := finalTestDoc + "\nA trailing paragraph.\n"
+	got := sm.Render(grown, 60, newTestRenderer(t, 60))
+	require.Equal(t, normalizeRender(freshRender(t, grown, 60)), normalizeRender(got))
+	require.Equal(t, countLines(trimGlamourMargins(got)), sm.LastLines())
+
+	require.Empty(t, sm.finalContent, "any other render clears the memo")
+
+	// Finishing after streaming reuses the prefix Render cached.
+	require.NotEmpty(t, sm.stablePrefix)
+	final := sm.RenderFinal(grown, 60, newTestRenderer(t, 60))
+	require.Equal(t, normalizeRender(freshRender(t, grown, 60)), normalizeRender(final))
+	require.NotEmpty(t, sm.stablePrefix)
+}
+
+// A finished message rendered cold goes through RenderFinal, so neither its
+// content nor its thinking seeds a stable prefix it would never reuse.
+func TestAssistantMessageItem_FinishedRendersFinal(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+	paragraphs := strings.Repeat("A paragraph of text.\n\n", 20)
+	msg := &message.Message{
+		ID:   "finished",
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.ReasoningContent{Thinking: paragraphs, StartedAt: testStartedAt, FinishedAt: testFinishedAt},
+			message.TextContent{Text: paragraphs},
+			message.Finish{Reason: message.FinishReasonEndTurn, Time: testFinishedAt},
+		},
+	}
+	item := NewAssistantMessageItem(&sty, msg).(*AssistantMessageItem)
+	item.RawRender(80)
+
+	require.Empty(t, item.streamingContent.stablePrefix, "finished content must render final")
+	require.Empty(t, item.streamingThinking.stablePrefix, "finished thinking must render final")
+	require.NotEmpty(t, item.streamingContent.finalContent)
+	require.NotEmpty(t, item.streamingThinking.finalContent)
 }
